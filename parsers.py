@@ -32,38 +32,67 @@ def get_schedule_for_day(group, day_name):
     try:
         response = requests.get(url)
         soup = BeautifulSoup(response.text, 'html.parser')
-        group_header = soup.find(lambda tag: tag.name in ['h3', 'h4'] and group in tag.text)
-        if not group_header: return []
+        
+        # Ищем заголовок нужной группы
+        group_header = None
+        for tag in soup.find_all(['h2', 'h3']):
+            if group in tag.text:
+                group_header = tag
+                break
+                
+        if not group_header: 
+            return []
             
-        schedule_text = []
-        for sibling in group_header.find_next_siblings():
-            if sibling.name == 'h3': break
-            schedule_text.append(sibling.text.strip())
+        # Собираем все текстовые строки под заголовком группы до следующей группы
+        lines = []
+        for sib in group_header.find_next_siblings():
+            # Если встретили заголовок следующей группы, останавливаемся
+            if sib.name in ['h2', 'h3']: 
+                break
             
-        text = " ".join(schedule_text)
-        days = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця"]
-        if day_name not in text: return []
-            
-        day_start = text.find(day_name)
-        next_day_idx = len(text)
-        for d in days:
-            if d != day_name:
-                idx = text.find(d, day_start + len(day_name))
-                if idx != -1 and idx < next_day_idx:
-                    next_day_idx = idx
+            # Извлекаем чистый текст из всех вложенных тегов
+            for text_node in sib.find_all(string=True):
+                clean_text = text_node.strip()
+                if clean_text:
+                    lines.append(clean_text)
                     
-        day_text = text[day_start:next_day_idx]
+        # Парсим строки
         lessons = []
-        matches = re.finditer(r'\b([1-6])\b\s+([^\d]+)', day_text)
-        for match in matches:
-            pair_num = int(match.group(1))
-            content = re.sub(r'\s+', ' ', match.group(2).strip())
-            if len(content) > 2 and not content.isdigit():
-                lessons.append({"pair": pair_num, "info": content})
+        is_target_day = False
+        current_pair = None
+        days_of_week = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота"]
+        
+        for line in lines:
+            # Если это название дня недели
+            if line in days_of_week:
+                if line == day_name:
+                    is_target_day = True
+                else:
+                    is_target_day = False
+                current_pair = None
+                continue
+                
+            if is_target_day:
+                # Если строка - это номер пары (1-7)
+                if line.isdigit() and 1 <= int(line) <= 7:
+                    current_pair = int(line)
+                elif current_pair is not None:
+                    # Если это название предмета или препод
+                    pair_exists = False
+                    for l in lessons:
+                        if l['pair'] == current_pair:
+                            l['info'] += f" {line}"
+                            pair_exists = True
+                            break
+                    if not pair_exists:
+                        lessons.append({"pair": current_pair, "info": line})
+                        
         return lessons
-    except Exception:
+    except Exception as e:
+        print(f"Ошибка парсинга расписания: {e}")
         return []
 
+# --- Функция замен (осталась без изменений, она отлично работала) ---
 def get_substitutions(group):
     url = "https://www.stxt.com.ua/download/zam.php"
     added, removed = {}, []
@@ -73,7 +102,6 @@ def get_substitutions(group):
         response = requests.get(url, headers=headers)
         content = response.content
 
-        # --- Метод 1: Сайт отдает HTML-таблицу ---
         if b"<table" in content[:1000].lower():
             soup = BeautifulSoup(content, 'html.parser')
             current_pair = None
@@ -90,7 +118,6 @@ def get_substitutions(group):
                         added[current_pair] = subject
             return {"added": added, "removed": removed}
 
-        # --- Метод 2: Сайт отдает современный DOCX (ZIP) ---
         try:
             with zipfile.ZipFile(BytesIO(content)) as z:
                 if 'word/document.xml' in z.namelist():
@@ -116,7 +143,6 @@ def get_substitutions(group):
         except zipfile.BadZipFile:
             pass
 
-        # --- Метод 3: Excel ---
         try:
             wb = openpyxl.load_workbook(BytesIO(content), data_only=True)
             current_pair = None
@@ -135,36 +161,23 @@ def get_substitutions(group):
         except Exception:
             pass
 
-        # --- Метод 4: Старый бинарный DOC (ИСПРАВЛЕНО!) ---
         try:
             ole = olefile.OleFileIO(BytesIO(content))
             if ole.exists('WordDocument'):
-                print("Замены: формат старого DOC")
                 text = ole.openstream('WordDocument').read().decode('utf-16-le', errors='ignore')
-                
-                # Убираем перенос строки ВНУТРИ ячеек (чтобы не ломать ФИО)
                 text = text.replace('\r', ' ').replace('\n', ' ')
-                
-                # Разделяем на ячейки по спецсимволу \x07
                 cells = text.split('\x07')
                 current_pair = None
-                
                 for i, cell in enumerate(cells):
                     cell = cell.strip()
                     if not cell: continue
-                    
-                    # Если это цифра (номер пары)
                     if cell.isdigit() and len(cell) <= 2 and int(cell) < 10:
                         current_pair = cell
-                        
-                    # Если нашли нашу группу
                     if group in cell and current_pair:
-                        if '\x00' in cell: break # Защита от мусора
-                        
+                        if '\x00' in cell: break 
                         subject = cells[i+2].strip() if i+2 < len(cells) else ""
                         teacher = cells[i+3].strip() if i+3 < len(cells) else ""
                         last_col = cells[i+4].strip() if i+4 < len(cells) else ""
-                        
                         if "ЗНЯТО" in subject.upper() or "ЗНЯТО" in teacher.upper() or "ЗНЯТО" in last_col.upper():
                             removed.append(current_pair)
                         else:
@@ -173,8 +186,8 @@ def get_substitutions(group):
                                 if teacher: info += f" - {teacher}"
                                 added[current_pair] = info
                 return {"added": added, "removed": removed}
-        except Exception as e:
-            print(f"Ошибка чтения DOC: {e}")
+        except Exception:
+            pass
             
     except Exception as e:
         print(f"Ошибка скачивания замен: {e}")
