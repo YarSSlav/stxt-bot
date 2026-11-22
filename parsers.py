@@ -21,6 +21,7 @@ def get_groups():
     url = "https://www.stxt.com.ua/schedule"
     try:
         response = requests.get(url)
+        response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
         groups = [h3.text.strip() for h3 in soup.find_all('h3') if h3.text.strip()]
         return groups if groups else ["МАШ24", "КН25", "АКТ26"]
@@ -31,65 +32,70 @@ def get_schedule_for_day(group, day_name):
     url = "https://www.stxt.com.ua/schedule"
     try:
         response = requests.get(url)
+        response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Ищем заголовок нашей группы
-        group_header = None
-        for h3 in soup.find_all('h3'):
-            if h3.get_text(strip=True) == group:
-                group_header = h3
-                break
-                
+        # 1. Находим заголовок группы
+        group_header = soup.find(lambda tag: tag.name in ['h3', 'h2'] and group in tag.text)
         if not group_header: 
             return []
-
+            
         days = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота"]
-        current_day = None
+        is_target_day = False
         lessons = []
         current_pair = None
-        current_lesson_info = []
-
-        # Идем по элементам сайта строго сверху вниз
-        for sibling in group_header.find_next_siblings():
-            if sibling.name == 'h3': # Началась другая группа - стоп
-                break
+        current_info = []
+        
+        # 2. Идем по всем элементам после заголовка группы
+        for sib in group_header.find_next_siblings():
+            if sib.name in ['h3', 'h2']: 
+                break # Началась другая группа
                 
-            text = sibling.get_text(strip=True)
+            text = sib.get_text(separator=' ', strip=True)
             if not text: continue
-
-            # Если это день недели (заголовок h4)
+            
+            # Если это заголовок дня недели
             if text in days:
-                # Если мы закончили нужный день, сохраняем последнюю пару
-                if current_day == day_name and current_pair is not None and current_lesson_info:
-                    lessons.append({"pair": current_pair, "info": " ".join(current_lesson_info)})
-                
-                current_day = text
-                current_pair = None
-                current_lesson_info = []
+                # Если мы уже прошли нужный день, сохраняем последнюю пару и выходим
+                if is_target_day:
+                    if current_pair is not None and current_info:
+                        lessons.append({"pair": current_pair, "info": " ".join(current_info)})
+                    break 
+                is_target_day = (text == day_name)
                 continue
-
-            # Если мы внутри нужного дня
-            if current_day == day_name:
-                if text.isdigit() and len(text) <= 2:
-                    # Встретили новую пару (например, "4")
-                    if current_pair is not None and current_lesson_info:
-                        lessons.append({"pair": current_pair, "info": " ".join(current_lesson_info)})
-                    current_pair = int(text)
-                    current_lesson_info = []
-                elif current_pair is not None:
-                    # Это предмет или препод
-                    current_lesson_info.append(text)
-
-        # Сохраняем самую последнюю пару, если день закончился
-        if current_day == day_name and current_pair is not None and current_lesson_info:
-            lessons.append({"pair": current_pair, "info": " ".join(current_lesson_info)})
+                
+            if is_target_day:
+                # Если расписание сверстано таблицей (тег table)
+                if sib.name == 'table':
+                    for tr in sib.find_all('tr'):
+                        cells = [td.get_text(separator=' ', strip=True) for td in tr.find_all(['td', 'th'])]
+                        if len(cells) >= 2 and cells[0].isdigit():
+                            pair_num = int(cells[0])
+                            info = " ".join(cells[1:])
+                            lessons.append({"pair": pair_num, "info": info})
+                # Если это просто блоки текста (div, p)
+                else:
+                    lines = sib.get_text(separator='\n', strip=True).split('\n')
+                    for line in lines:
+                        line = line.strip()
+                        if not line: continue
+                        
+                        # Если строка - это номер пары (1-6)
+                        if line.isdigit() and len(line) <= 2:
+                            if current_pair is not None and current_info:
+                                lessons.append({"pair": current_pair, "info": " ".join(current_info)})
+                            current_pair = int(line)
+                            current_info = []
+                        # Если строка - это предмет или преподаватель
+                        elif current_pair is not None:
+                            current_info.append(line)
 
         return lessons
     except Exception as e:
         print(f"Ошибка парсинга расписания: {e}")
         return []
 
-# --- Дальше идет функция замен (она работает идеально, не трогаем) ---
+# --- Функция замен (осталась без изменений) ---
 def get_substitutions(group):
     url = "https://www.stxt.com.ua/download/zam.php"
     added, removed = {}, []
