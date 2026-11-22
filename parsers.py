@@ -45,13 +45,17 @@ def get_schedule_for_day(group, day_name):
         
         # 2. Находим, где начинается наша группа и где заканчивается
         for i, line in enumerate(lines):
-            if line == group:
+            if re.search(rf'\b{re.escape(group)}\b', line):
                 start_idx = i
-            elif line in all_groups and start_idx != -1:
-                end_idx = i
                 break
                 
         if start_idx == -1: return []
+
+        for i in range(start_idx + 1, len(lines)):
+            if lines[i] in all_groups:
+                end_idx = i
+                break
+        
         if end_idx == -1: end_idx = len(lines)
             
         group_lines = lines[start_idx:end_idx]
@@ -67,7 +71,6 @@ def get_schedule_for_day(group, day_name):
             # Если нашли день недели
             if line in days:
                 if is_target_day:
-                    # Если мы уже прошли нужный день, сохраняем последнюю пару и выходим
                     if current_pair is not None and current_info:
                         lessons.append({"pair": current_pair, "info": " ".join(current_info)})
                     break 
@@ -76,12 +79,13 @@ def get_schedule_for_day(group, day_name):
                 
             # Если мы внутри нужного дня
             if is_target_day:
-                if line.isdigit() and len(line) <= 2:
-                    # Новая пара
+                # Проверяем, начинается ли строка с номера пары (например, "4", "4.", "4 Українська мова")
+                match = re.match(r'^([1-7])\b[\.\s]*(.*)', line)
+                if match:
                     if current_pair is not None and current_info:
                         lessons.append({"pair": current_pair, "info": " ".join(current_info)})
-                    current_pair = int(line)
-                    current_info = []
+                    current_pair = int(match.group(1))
+                    current_info = [match.group(2).strip()] if match.group(2).strip() else []
                 elif current_pair is not None:
                     # Название предмета или преподаватель
                     current_info.append(line)
@@ -95,7 +99,7 @@ def get_schedule_for_day(group, day_name):
         print(f"Ошибка парсинга расписания: {e}")
         return []
 
-# --- Функция замен (осталась без изменений) ---
+# --- Функция замен (осталась без изменений, она работает идеально) ---
 def get_substitutions(group):
     url = "https://www.stxt.com.ua/download/zam.php"
     added, removed = {}, []
