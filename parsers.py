@@ -35,61 +35,61 @@ def get_schedule_for_day(group, day_name):
         response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 1. Находим заголовок группы
-        group_header = soup.find(lambda tag: tag.name in ['h3', 'h2'] and group in tag.text)
-        if not group_header: 
-            return []
+        # 1. Получаем ВЕСЬ текст страницы, разбитый на строки
+        text = soup.get_text(separator='\n', strip=True)
+        lines = [line.replace('\xa0', ' ').strip() for line in text.split('\n') if line.strip()]
+        
+        all_groups = get_groups()
+        start_idx = -1
+        end_idx = -1
+        
+        # 2. Находим, где начинается наша группа и где заканчивается
+        for i, line in enumerate(lines):
+            if line == group:
+                start_idx = i
+            elif line in all_groups and start_idx != -1:
+                end_idx = i
+                break
+                
+        if start_idx == -1: return []
+        if end_idx == -1: end_idx = len(lines)
             
+        group_lines = lines[start_idx:end_idx]
+        
+        # 3. Идем по строчкам и выуживаем пары
         days = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота"]
         is_target_day = False
-        lessons = []
         current_pair = None
         current_info = []
+        lessons = []
         
-        # 2. Идем по всем элементам после заголовка группы
-        for sib in group_header.find_next_siblings():
-            if sib.name in ['h3', 'h2']: 
-                break # Началась другая группа
-                
-            text = sib.get_text(separator=' ', strip=True)
-            if not text: continue
-            
-            # Если это заголовок дня недели
-            if text in days:
-                # Если мы уже прошли нужный день, сохраняем последнюю пару и выходим
+        for line in group_lines:
+            # Если нашли день недели
+            if line in days:
                 if is_target_day:
+                    # Если мы уже прошли нужный день, сохраняем последнюю пару и выходим
                     if current_pair is not None and current_info:
                         lessons.append({"pair": current_pair, "info": " ".join(current_info)})
                     break 
-                is_target_day = (text == day_name)
+                is_target_day = (line == day_name)
                 continue
                 
+            # Если мы внутри нужного дня
             if is_target_day:
-                # Если расписание сверстано таблицей (тег table)
-                if sib.name == 'table':
-                    for tr in sib.find_all('tr'):
-                        cells = [td.get_text(separator=' ', strip=True) for td in tr.find_all(['td', 'th'])]
-                        if len(cells) >= 2 and cells[0].isdigit():
-                            pair_num = int(cells[0])
-                            info = " ".join(cells[1:])
-                            lessons.append({"pair": pair_num, "info": info})
-                # Если это просто блоки текста (div, p)
-                else:
-                    lines = sib.get_text(separator='\n', strip=True).split('\n')
-                    for line in lines:
-                        line = line.strip()
-                        if not line: continue
-                        
-                        # Если строка - это номер пары (1-6)
-                        if line.isdigit() and len(line) <= 2:
-                            if current_pair is not None and current_info:
-                                lessons.append({"pair": current_pair, "info": " ".join(current_info)})
-                            current_pair = int(line)
-                            current_info = []
-                        # Если строка - это предмет или преподаватель
-                        elif current_pair is not None:
-                            current_info.append(line)
-
+                if line.isdigit() and len(line) <= 2:
+                    # Новая пара
+                    if current_pair is not None and current_info:
+                        lessons.append({"pair": current_pair, "info": " ".join(current_info)})
+                    current_pair = int(line)
+                    current_info = []
+                elif current_pair is not None:
+                    # Название предмета или преподаватель
+                    current_info.append(line)
+                    
+        # Сохраняем самую последнюю пару, если день закончился
+        if is_target_day and current_pair is not None and current_info:
+            lessons.append({"pair": current_pair, "info": " ".join(current_info)})
+            
         return lessons
     except Exception as e:
         print(f"Ошибка парсинга расписания: {e}")
