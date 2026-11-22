@@ -127,6 +127,12 @@ def get_bus_keyboard():
     return builder.as_markup()
 
 
+def get_bus_back_keyboard():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="🚌 Інші маршрути", callback_data="busmenu")
+    return builder.as_markup()
+
+
 # ───────────────────────── Команди ─────────────────────────
 
 @dp.message(Command("start"))
@@ -162,9 +168,19 @@ async def cmd_tomorrow(message: Message):
 async def process_bus(callback: CallbackQuery):
     route = callback.data.split('_', 1)[1]
     await callback.answer()
-    await callback.message.answer(f"Шукаю розклад для маршруту {route}...")
+    # Редагуємо те саме повідомлення з кнопками: у чаті лишається лише розклад
+    await callback.message.edit_text(f"Шукаю розклад для маршруту {route}...")
     schedule = await asyncio.to_thread(get_bus_schedule, route)
-    await callback.message.answer(schedule)
+    await callback.message.edit_text(schedule, reply_markup=get_bus_back_keyboard())
+
+
+@dp.callback_query(F.data == "busmenu")
+async def process_bus_menu(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.edit_text(
+        "Переглянути розклад автобусів?",
+        reply_markup=get_bus_keyboard(),
+    )
 
 
 @dp.message(Command("debug"))
