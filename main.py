@@ -3,13 +3,14 @@ import os
 import socket
 import sqlite3
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta
 from html import escape
 
 import pytz
 from aiogram import BaseMiddleware, Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import BotCommand, CallbackQuery, Message
+from aiogram.types import BotCommand, CallbackQuery, KeyboardButton, Message, ReplyKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -36,6 +37,11 @@ dp = Dispatcher()
 scheduler = AsyncIOScheduler(timezone="Europe/Kyiv")
 KYIV_TZ = pytz.timezone('Europe/Kyiv')
 
+# Підписи кнопок нижньої панелі
+BTN_TODAY = "📅 Сьогодні"
+BTN_TOMORROW = "📆 Завтра"
+BTN_GROUP = "👥 Група"
+
 DAYS_MAP = {0: "Понеділок", 1: "Вівторок", 2: "Середа", 3: "Четвер", 4: "П'ятниця"}
 
 
@@ -47,6 +53,10 @@ def init_db():
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         group_name TEXT
+    )''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS chat_messages (
+        chat_id INTEGER PRIMARY KEY,
+        message_ids TEXT
     )''')
     conn.commit()
     conn.close()
@@ -76,6 +86,62 @@ def get_all_users():
     result = cursor.fetchall()
     conn.close()
     return result
+
+
+# ───────────────────────── Чистий чат ─────────────────────────
+# У чаті лишаються тільки актуальні повідомлення бота: команди користувача
+# видаляються одразу, а попередні повідомлення бота — коли приходить нове.
+
+_chat_locks = defaultdict(asyncio.Lock)
+
+
+def get_tracked(chat_id):
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT message_ids FROM chat_messages WHERE chat_id = ?', (chat_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return [int(i) for i in row[0].split(',') if i] if row and row[0] else []
+
+
+def set_tracked(chat_id, ids):
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    cursor.execute(
+        'INSERT OR REPLACE INTO chat_messages (chat_id, message_ids) VALUES (?, ?)',
+        (chat_id, ','.join(str(i) for i in ids)),
+    )
+    conn.commit()
+    conn.close()
+
+
+async def safe_delete(chat_id, message_id):
+    try:
+        await bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass  # вже видалене або старше 48 годин
+
+
+async def delete_user_message(message: Message):
+    await safe_delete(message.chat.id, message.message_id)
+
+
+async def show(chat_id, items):
+    """
+    Видаляє попередні актуальні повідомлення бота і надсилає нові.
+    items — список (текст, параметри для send_message).
+    """
+    async with _chat_locks[chat_id]:
+        for mid in get_tracked(chat_id):
+            await safe_delete(chat_id, mid)
+        set_tracked(chat_id, [])
+        ids = []
+        for i, (text, kwargs) in enumerate(items):
+            if i == 0 and "reply_markup" not in kwargs:
+                kwargs = {**kwargs, "reply_markup": get_main_menu()}
+            msg = await bot.send_message(chat_id, text, **kwargs)
+            ids.append(msg.message_id)
+            set_tracked(chat_id, ids)
 
 
 # ───────────────────────── Захист від дублів ─────────────────────────
@@ -110,6 +176,20 @@ dp.update.outer_middleware(DedupMiddleware())
 
 # ───────────────────────── Клавіатури ─────────────────────────
 
+def get_main_menu():
+    """Постійна панель знизу: сьогодні / завтра / вибір групи."""
+    return ReplyKeyboardMarkup(
+        keyboard=[[
+            KeyboardButton(text=BTN_TODAY),
+            KeyboardButton(text=BTN_TOMORROW),
+            KeyboardButton(text=BTN_GROUP),
+        ]],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Обери дію 👇",
+    )
+
+
 async def get_groups_keyboard():
     builder = InlineKeyboardBuilder()
     groups = await asyncio.to_thread(get_groups)
@@ -136,11 +216,14 @@ def get_bus_back_keyboard():
 # ───────────────────────── Команди ─────────────────────────
 
 @dp.message(Command("start"))
+@dp.message(F.text == BTN_GROUP)
 async def cmd_start(message: Message):
-    await message.answer(
-        "Привіт! Обери свою групу, щоб я надсилав розклад:",
-        reply_markup=await get_groups_keyboard(),
-    )
+    await delete_user_message(message)
+    await show(message.chat.id, [
+        ("Привіт! 👋 Команди завжди під рукою на панелі знизу.", {}),
+        ("Обери свою групу, щоб я надсилав розклад:",
+         {"reply_markup": await get_groups_keyboard()}),
+    ])
 
 
 @dp.callback_query(F.data.startswith('group_'))
@@ -155,13 +238,15 @@ async def process_group(callback: CallbackQuery):
 
 
 @dp.message(Command("today"))
+@dp.message(F.text == BTN_TODAY)
 async def cmd_today(message: Message):
-    await send_schedule(message.from_user.id, message, offset=0)
+    await send_schedule(message, offset=0)
 
 
 @dp.message(Command("tomorrow"))
+@dp.message(F.text == BTN_TOMORROW)
 async def cmd_tomorrow(message: Message):
-    await send_schedule(message.from_user.id, message, offset=1)
+    await send_schedule(message, offset=1)
 
 
 @dp.callback_query(F.data.startswith('bus_'))
@@ -171,7 +256,11 @@ async def process_bus(callback: CallbackQuery):
     # Редагуємо те саме повідомлення з кнопками: у чаті лишається лише розклад
     await callback.message.edit_text(f"Шукаю розклад для маршруту {route}...")
     schedule = await asyncio.to_thread(get_bus_schedule, route)
-    await callback.message.edit_text(schedule, reply_markup=get_bus_back_keyboard())
+    await callback.message.edit_text(
+        schedule,
+        parse_mode="HTML",
+        reply_markup=get_bus_back_keyboard(),
+    )
 
 
 @dp.callback_query(F.data == "busmenu")
@@ -186,9 +275,10 @@ async def process_bus_menu(callback: CallbackQuery):
 @dp.message(Command("debug"))
 async def cmd_debug(message: Message):
     """Показує, що парсер реально бачить на сайті для твоєї групи."""
+    await delete_user_message(message)
     group = get_user_group(message.from_user.id)
     if not group:
-        await message.answer("Спочатку обери групу через /start")
+        await show(message.chat.id, [("Спочатку обери групу через /start", {})])
         return
 
     def work():
@@ -199,15 +289,30 @@ async def cmd_debug(message: Message):
         text = f"Група: {group}\nРядків у блоці групи: {len(lines)}\n\n" + "\n".join(lines[:50])
     except Exception as e:
         text = f"Помилка: {type(e).__name__}: {e}"
-    await message.answer(text[:4000])
+    await show(message.chat.id, [(text[:4000], {})])
 
 
 @dp.message(Command("ping"))
 async def cmd_ping(message: Message):
-    await message.answer(f"pid={os.getpid()} host={socket.gethostname()}")
+    await delete_user_message(message)
+    await show(message.chat.id, [(f"pid={os.getpid()} host={socket.gethostname()}", {})])
 
 
 # ───────────────────────── Збірка повідомлення ─────────────────────────
+
+DIVIDER = "▬▬▬▬▬▬▬▬▬▬▬▬"
+
+
+def format_lesson(info):
+    """«Предмет | Викладач | Ауд.» -> предмет окремим рядком, решта курсивом під ним."""
+    parts = [p.strip() for p in info.split(" | ") if p.strip()]
+    if not parts:
+        return ""
+    text = escape(parts[0])
+    if len(parts) > 1:
+        text += "\n<i>" + escape(" · ".join(parts[1:])) + "</i>"
+    return text
+
 
 async def build_schedule_message(user_id, offset=1):
     """offset=0 — сьогодні, offset=1 — завтра."""
@@ -247,7 +352,7 @@ async def build_schedule_message(user_id, offset=1):
     for lesson in base_lessons:
         pair_num = lesson['pair']
         if str(pair_num) not in removed_pairs:
-            final_lessons[pair_num] = escape(lesson['info'])
+            final_lessons[pair_num] = (lesson['info'], False)
 
     # 2. Додаємо або замінюємо пари із замін
     for pair_str, info in added_pairs.items():
@@ -256,7 +361,7 @@ async def build_schedule_message(user_id, offset=1):
         except ValueError:
             continue
         if str(pair_num) not in removed_pairs and info:
-            final_lessons[pair_num] = f"{escape(info)} <b>(Заміна)</b>"
+            final_lessons[pair_num] = (info, True)
 
     notes = ""
     if schedule_error:
@@ -270,15 +375,20 @@ async def build_schedule_message(user_id, offset=1):
     if not final_lessons:
         return f"{notes}{label} ({day_name}) пар немає (і замін теж).{note_dates}", get_bus_keyboard()
 
-    msg = f"{notes}📅 <b>{label}, {day_name} | Група {escape(group)}</b>\n\n"
+    msg = f"{notes}📅 <b>{label}, {day_name}</b>\n👥 Група {escape(group)}\n{DIVIDER}\n\n"
     first_lesson_time = None
 
     for pair_num in sorted(final_lessons):
+        info, is_sub = final_lessons[pair_num]
         time_str = BELL_SCHEDULE.get(pair_num, "")
         if not first_lesson_time and time_str:
             first_lesson_time = time_str.split('–')[0]
-        time_part = f" ({time_str})" if time_str else ""
-        msg += f"<b>{pair_num} пара</b>{time_part}\n{final_lessons[pair_num]}\n\n"
+        head = f"<b>{pair_num} пара</b>"
+        if time_str:
+            head += f" · {time_str}"
+        if is_sub:
+            head += " · 🔄 <b>заміна</b>"
+        msg += f"{head}\n{format_lesson(info)}\n\n"
 
     if first_lesson_time and offset == 1:
         msg += f"⏰ Перша пара починається о {first_lesson_time}"
@@ -286,11 +396,13 @@ async def build_schedule_message(user_id, offset=1):
     return msg.strip() + note_dates, get_bus_keyboard()
 
 
-async def send_schedule(user_id, message: Message, offset=1):
-    text, bus_kb = await build_schedule_message(user_id, offset)
-    await message.answer(text, parse_mode="HTML")
+async def send_schedule(message: Message, offset=1):
+    await delete_user_message(message)
+    text, bus_kb = await build_schedule_message(message.from_user.id, offset)
+    items = [(text, {"parse_mode": "HTML"})]
     if bus_kb:
-        await message.answer("Переглянути розклад автобусів?", reply_markup=bus_kb)
+        items.append(("Переглянути розклад автобусів?", {"reply_markup": bus_kb}))
+    await show(message.chat.id, items)
 
 
 async def daily_mailing():
@@ -301,16 +413,19 @@ async def daily_mailing():
     for user_id, group in users:
         try:
             text, bus_kb = await build_schedule_message(user_id, offset=1)
-            await bot.send_message(chat_id=user_id, text=text, parse_mode="HTML")
+            items = [(text, {"parse_mode": "HTML"})]
             if bus_kb:
-                await bot.send_message(
-                    chat_id=user_id,
-                    text="Переглянути розклад автобусів?",
-                    reply_markup=bus_kb,
-                )
+                items.append(("Переглянути розклад автобусів?", {"reply_markup": bus_kb}))
+            await show(user_id, items)
             await asyncio.sleep(1)
         except Exception as e:
             print(f"Не вдалося надіслати повідомлення {user_id}: {e}")
+
+
+@dp.message()
+async def cleanup_other_messages(message: Message):
+    """Будь-який інший текст від користувача просто прибираємо з чату."""
+    await delete_user_message(message)
 
 
 async def main():
