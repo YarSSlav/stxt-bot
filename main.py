@@ -127,7 +127,12 @@ async def process_bus(callback: CallbackQuery):
     schedule = await asyncio.to_thread(get_bus_schedule, route)
     await callback.message.answer(schedule)
 
+import socket
 
+@dp.message(Command("ping"))
+async def cmd_ping(message: Message):
+    await message.answer(f"pid={os.getpid()} host={socket.gethostname()}")
+    
 @dp.message(Command("debug"))
 async def cmd_debug(message: Message):
     """Показує, що парсер реально бачить на сайті для твоєї групи."""
