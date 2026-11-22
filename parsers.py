@@ -4,6 +4,7 @@ import time
 import zipfile
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta
+from html import escape
 from io import BytesIO
 
 import openpyxl
@@ -291,17 +292,134 @@ def get_bus_routes():
     return ["3", "4", "5", "17", "30", "32", "34", "39", "40", "48", "49", "150", "152", "302"]
 
 
+BUS_HEAD_RE = re.compile(r"^№\s*(\d+|\.{3})\s*\|\s*(.*)$")
+BUS_TIME_RE = re.compile(r"\d{1,2}[:.]\d{2}")
+BUS_ENTRY_RE = re.compile(r"(\d{1,2})[:.](\d{2})([*#]*)\s*(\([^)|]*\)?)?")
+BUS_NOTE_RE = re.compile(r"^(рейс|\*|#|\\#|крім|з \d|тел)", re.IGNORECASE)
+BUS_STOP_WORDS = ("МАРШРУТИ", "ПЕРЕВІРЕНО", "АВТОПОСЛУГИ")
+TG_LIMIT = 3900          # запас до ліміту Telegram (4096)
+
+_BLOCK_TAGS = ["p", "div", "li", "ul", "ol", "tr", "table", "section",
+               "h1", "h2", "h3", "h4", "h5", "h6", "hr"]
+
+
+def _page_lines(url, ttl):
+    """Текст сторінки по рядках, як його бачить людина (<br> і блоки дають перенос)."""
+    soup = _soup(url, ttl)
+    for t in soup(["script", "style"]):
+        t.decompose()
+    for br in soup.find_all("br"):
+        br.replace_with("\n")
+    for tag in soup.find_all(_BLOCK_TAGS):
+        tag.insert(0, "\n")
+        tag.append("\n")
+    lines = (_norm(l) for l in soup.get_text().split("\n"))
+    return [l for l in lines if l]
+
+
+def _bus_block(lines, route):
+    """Знаходить блок маршруту. Пропускає рядки зі списку вкладок (без розкладу)."""
+    route = str(route)
+    for i, line in enumerate(lines):
+        m = BUS_HEAD_RE.match(line)
+        if not m or m.group(1) != route:
+            continue
+        block = []
+        for nxt in lines[i + 1:]:
+            if BUS_HEAD_RE.match(nxt) or any(w in nxt.upper() for w in BUS_STOP_WORDS):
+                break
+            block.append(nxt)
+        if any(b.startswith("Відправлення") for b in block):
+            return m.group(2), block
+    return None, None
+
+
+def _split_heading(line):
+    """«Відправлення з АС: 06:30 | ...» -> ("Відправлення з АС", "06:30 | ...")."""
+    m = re.search(r":(?!\d)", line)
+    if m:
+        return line[:m.start()].strip(), line[m.end():].strip()
+    m = BUS_TIME_RE.search(line)
+    if m:
+        return line[:m.start()].strip(), line[m.start():].strip()
+    return line, ""
+
+
+def _render_times(line):
+    """Рядок із часами -> список рядків (HTML): мітка (якщо є) і часи через « | »."""
+    m = BUS_TIME_RE.search(line)
+    if not m:
+        return [escape(line)]
+
+    res = []
+    label = line[:m.start()].strip().rstrip(":").strip()
+    if label:
+        res.append(f"<i>{escape(label)}</i>")
+
+    entries = []
+    for h, mm, mark, annot in BUS_ENTRY_RE.findall(line[m.start():]):
+        entry = f"{int(h):02d}:{mm}{mark}"
+        annot = annot.strip()
+        if annot:
+            if not annot.endswith(")"):
+                annot += ")"
+            entry += f" {annot}"
+        entries.append(entry)
+    res.append(escape(" | ".join(entries)))
+    return res
+
+
+def _format_bus(route, title, block):
+    out = [f"🚌 <b>Автобус №{escape(route)}</b>", ""]
+    if title:
+        out.append(f"<b>Маршрут:</b> {escape(title)}")
+
+    notes, in_notes = [], False
+    for line in block:
+        if in_notes or BUS_NOTE_RE.match(line):
+            in_notes = True
+            notes.append(line)
+        elif line.startswith("Відправлення"):
+            head, rest = _split_heading(line)
+            out.append("")
+            out.append(f"• <b>{escape(head)}:</b>")
+            if rest:
+                out.extend(_render_times(rest))
+        else:
+            out.extend(_render_times(line))
+
+    if notes:
+        out.append("")
+        for n in notes:
+            m = re.match(r"^([*#\\]+)\s*(.*)$", n)
+            if m:  # пояснення до позначок біля часів: «* — крім НД...»
+                mark = m.group(1).replace("\\", "")
+                out.append(f"ℹ️ {escape(mark)} — {escape(m.group(2))}")
+            elif n.lower().startswith("рейс"):
+                out.append(f"🗓 {escape(n)}")
+            else:
+                out.append(f"ℹ️ {escape(n)}")
+
+    # Ліміт Telegram: ріжемо по рядках, щоб не поламати HTML-теги
+    text, result = "", []
+    for ln in out:
+        if len(text) + len(ln) + 1 > TG_LIMIT:
+            result.append("…")
+            break
+        result.append(ln)
+        text += ln + "\n"
+    return "\n".join(result)
+
+
 def get_bus_schedule(route_num):
+    """Повертає розклад автобуса у форматі Telegram HTML."""
     try:
-        text = _soup(BUS_URL, TTL_BUS).get_text()
-        pattern = re.compile(rf"№\s*{re.escape(str(route_num))}\s*\|(.*?)(?=№|\Z)", re.DOTALL)
-        match = pattern.search(text)
-        if match:
-            schedule_text = match.group(1).strip()
-            return f"🚌 Автобус №{route_num}\n\n{schedule_text[:800]}..."
-        return f"Розклад для автобуса №{route_num} не знайдено."
+        title, block = _bus_block(_page_lines(BUS_URL, TTL_BUS), route_num)
+        if block is None:
+            return f"Розклад для автобуса №{escape(str(route_num))} не знайдено."
+        return _format_bus(str(route_num), title, block)
     except Exception as e:
-        return f"Помилка: {e}"
+        return f"Помилка: {escape(str(e))}"
 
 
 # ───────────────────────── Збірка повідомлення ─────────────────────────
