@@ -132,7 +132,7 @@ def get_bus_keyboard():
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer(
-        "Привет! Выбери свою группу, чтобы я присылал расписание:",
+        "Привіт! Обери свою групу, щоб я надсилав розклад:",
         reply_markup=await get_groups_keyboard(),
     )
 
@@ -142,9 +142,9 @@ async def process_group(callback: CallbackQuery):
     group_name = callback.data.split('_', 1)[1]
     set_user_group(callback.from_user.id, group_name)
     await callback.message.edit_text(
-        f"✅ Ты выбрал группу: {group_name}.\n\n"
-        f"Теперь каждый день в 18:00 я буду присылать расписание на завтра.\n"
-        f"Команды: /today — расписание на сегодня, /tomorrow — на завтра."
+        f"✅ Ти обрав групу: {group_name}.\n\n"
+        f"Тепер щодня о 18:00 я надсилатиму розклад на завтра.\n"
+        f"Команди: /today — розклад на сьогодні, /tomorrow — на завтра."
     )
 
 
@@ -162,7 +162,7 @@ async def cmd_tomorrow(message: Message):
 async def process_bus(callback: CallbackQuery):
     route = callback.data.split('_', 1)[1]
     await callback.answer()
-    await callback.message.answer(f"Ищу расписание для маршрута {route}...")
+    await callback.message.answer(f"Шукаю розклад для маршруту {route}...")
     schedule = await asyncio.to_thread(get_bus_schedule, route)
     await callback.message.answer(schedule)
 
@@ -172,7 +172,7 @@ async def cmd_debug(message: Message):
     """Показує, що парсер реально бачить на сайті для твоєї групи."""
     group = get_user_group(message.from_user.id)
     if not group:
-        await message.answer("Сначала выбери группу через /start")
+        await message.answer("Спочатку обери групу через /start")
         return
 
     def work():
@@ -180,9 +180,9 @@ async def cmd_debug(message: Message):
 
     try:
         lines = await asyncio.to_thread(work)
-        text = f"Группа: {group}\nСтрок в блоке группы: {len(lines)}\n\n" + "\n".join(lines[:50])
+        text = f"Група: {group}\nРядків у блоці групи: {len(lines)}\n\n" + "\n".join(lines[:50])
     except Exception as e:
-        text = f"Ошибка: {type(e).__name__}: {e}"
+        text = f"Помилка: {type(e).__name__}: {e}"
     await message.answer(text[:4000])
 
 
@@ -197,14 +197,14 @@ async def build_schedule_message(user_id, offset=1):
     """offset=0 — сьогодні, offset=1 — завтра."""
     group = get_user_group(user_id)
     if not group:
-        return "Сначала выбери группу через /start", None
+        return "Спочатку обери групу через /start", None
 
-    label = "Сегодня" if offset == 0 else "Завтра"
+    label = "Сьогодні" if offset == 0 else "Завтра"
     target = datetime.now(KYIV_TZ) + timedelta(days=offset)
     target_date = target.date()
 
     if target.weekday() >= 5:
-        return f"{label} выходной. Отдыхай! 🎉", get_bus_keyboard()
+        return f"{label} вихідний. Відпочивай! 🎉", get_bus_keyboard()
 
     day_name = DAYS_MAP[target.weekday()]
 
@@ -244,17 +244,17 @@ async def build_schedule_message(user_id, offset=1):
 
     notes = ""
     if schedule_error:
-        notes += "⚠️ Не удалось загрузить основное расписание с сайта, показаны только замены.\n\n"
+        notes += "⚠️ Не вдалося завантажити основний розклад із сайту, показано лише заміни.\n\n"
 
     note_dates = ""
     if not subs_apply:
         dates_str = ", ".join(d.strftime("%d.%m") for d in sorted(subs_dates))
-        note_dates = f"\n\nℹ️ Файл замен относится к другой дате ({dates_str}), на этот день замен нет."
+        note_dates = f"\n\nℹ️ Файл замін стосується іншої дати ({dates_str}), на цей день замін немає."
 
     if not final_lessons:
-        return f"{notes}{label} ({day_name}) пар нет (и замен тоже).{note_dates}", get_bus_keyboard()
+        return f"{notes}{label} ({day_name}) пар немає (і замін теж).{note_dates}", get_bus_keyboard()
 
-    msg = f"{notes}📅 <b>{label}, {day_name} | Группа {escape(group)}</b>\n\n"
+    msg = f"{notes}📅 <b>{label}, {day_name} | Група {escape(group)}</b>\n\n"
     first_lesson_time = None
 
     for pair_num in sorted(final_lessons):
@@ -265,7 +265,7 @@ async def build_schedule_message(user_id, offset=1):
         msg += f"<b>{pair_num} пара</b>{time_part}\n{final_lessons[pair_num]}\n\n"
 
     if first_lesson_time and offset == 1:
-        msg += f"⏰ Первая пара начинается в {first_lesson_time}"
+        msg += f"⏰ Перша пара починається о {first_lesson_time}"
 
     return msg.strip() + note_dates, get_bus_keyboard()
 
@@ -274,7 +274,7 @@ async def send_schedule(user_id, message: Message, offset=1):
     text, bus_kb = await build_schedule_message(user_id, offset)
     await message.answer(text, parse_mode="HTML")
     if bus_kb:
-        await message.answer("Посмотреть расписание автобусов?", reply_markup=bus_kb)
+        await message.answer("Переглянути розклад автобусів?", reply_markup=bus_kb)
 
 
 async def daily_mailing():
@@ -289,25 +289,25 @@ async def daily_mailing():
             if bus_kb:
                 await bot.send_message(
                     chat_id=user_id,
-                    text="Посмотреть расписание автобусов?",
+                    text="Переглянути розклад автобусів?",
                     reply_markup=bus_kb,
                 )
             await asyncio.sleep(1)
         except Exception as e:
-            print(f"Не удалось отправить сообщение {user_id}: {e}")
+            print(f"Не вдалося надіслати повідомлення {user_id}: {e}")
 
 
 async def main():
     init_db()
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_my_commands([
-        BotCommand(command="today", description="Расписание на сегодня"),
-        BotCommand(command="tomorrow", description="Расписание на завтра"),
-        BotCommand(command="start", description="Выбрать группу"),
+        BotCommand(command="today", description="Розклад на сьогодні"),
+        BotCommand(command="tomorrow", description="Розклад на завтра"),
+        BotCommand(command="start", description="Обрати групу"),
     ])
     scheduler.add_job(daily_mailing, 'cron', hour=18, minute=0)
     scheduler.start()
-    print(f"Бот запущен! pid={os.getpid()} host={socket.gethostname()}")
+    print(f"Бот запущено! pid={os.getpid()} host={socket.gethostname()}")
     await dp.start_polling(bot)
 
 
