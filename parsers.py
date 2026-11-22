@@ -33,53 +33,63 @@ def get_schedule_for_day(group, day_name):
         response = requests.get(url)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Ищем заголовок группы
-        group_header = soup.find(lambda tag: tag.name in ['h2', 'h3'] and group in tag.text)
+        # Ищем заголовок нашей группы
+        group_header = None
+        for h3 in soup.find_all('h3'):
+            if h3.get_text(strip=True) == group:
+                group_header = h3
+                break
+                
         if not group_header: 
             return []
-            
-        # Собираем текст до следующей группы
-        schedule_text = []
-        for sibling in group_header.find_next_siblings():
-            if sibling.name in ['h2', 'h3']: 
-                break
-            text_content = sibling.get_text(separator=' ', strip=True)
-            if text_content:
-                schedule_text.append(text_content)
-                
-        text = " ".join(schedule_text)
+
         days = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота"]
-        
-        if day_name not in text: 
-            return []
-            
-        # Вырезаем нужный день
-        day_start = text.find(day_name)
-        next_day_idx = len(text)
-        for d in days:
-            if d != day_name:
-                idx = text.find(d, day_start + len(day_name))
-                if idx != -1 and idx < next_day_idx:
-                    next_day_idx = idx
-                    
-        day_text = text[day_start:next_day_idx]
-        
-        # Умный поиск пар: ищем цифру от 1 до 6, пробел, а затем текст до следующей цифры 1-6 с большой буквы
+        current_day = None
         lessons = []
-        matches = re.finditer(r'\b([1-6])\b\s+(.+?)(?=\s+\b[1-6]\b\s+[А-ЯІЇЄ]|$)', day_text)
-        for match in matches:
-            pair_num = int(match.group(1))
-            content = match.group(2).strip()
-            content = re.sub(r'\s+', ' ', content) # Убираем лишние пробелы
-            if len(content) > 2:
-                lessons.append({"pair": pair_num, "info": content})
+        current_pair = None
+        current_lesson_info = []
+
+        # Идем по элементам сайта строго сверху вниз
+        for sibling in group_header.find_next_siblings():
+            if sibling.name == 'h3': # Началась другая группа - стоп
+                break
                 
+            text = sibling.get_text(strip=True)
+            if not text: continue
+
+            # Если это день недели (заголовок h4)
+            if text in days:
+                # Если мы закончили нужный день, сохраняем последнюю пару
+                if current_day == day_name and current_pair is not None and current_lesson_info:
+                    lessons.append({"pair": current_pair, "info": " ".join(current_lesson_info)})
+                
+                current_day = text
+                current_pair = None
+                current_lesson_info = []
+                continue
+
+            # Если мы внутри нужного дня
+            if current_day == day_name:
+                if text.isdigit() and len(text) <= 2:
+                    # Встретили новую пару (например, "4")
+                    if current_pair is not None and current_lesson_info:
+                        lessons.append({"pair": current_pair, "info": " ".join(current_lesson_info)})
+                    current_pair = int(text)
+                    current_lesson_info = []
+                elif current_pair is not None:
+                    # Это предмет или препод
+                    current_lesson_info.append(text)
+
+        # Сохраняем самую последнюю пару, если день закончился
+        if current_day == day_name and current_pair is not None and current_lesson_info:
+            lessons.append({"pair": current_pair, "info": " ".join(current_lesson_info)})
+
         return lessons
     except Exception as e:
         print(f"Ошибка парсинга расписания: {e}")
         return []
 
-# --- Функция замен (осталась без изменений) ---
+# --- Дальше идет функция замен (она работает идеально, не трогаем) ---
 def get_substitutions(group):
     url = "https://www.stxt.com.ua/download/zam.php"
     added, removed = {}, []
