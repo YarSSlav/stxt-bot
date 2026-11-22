@@ -13,7 +13,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from parsers import get_groups, get_schedule_for_day, get_substitutions, get_bus_routes, get_bus_schedule, BELL_SCHEDULE
 
 
-BOT_TOKEN = os.getenv('9011847956:AAHFTaQuKPwg9MpAvm91AKFYFAt-hsSrNr4') 
+BOT_TOKEN = '9011847956:AAHFTaQuKPwg9MpAvm91AKFYFAt-hsSrNr4' 
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
