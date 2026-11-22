@@ -23,10 +23,15 @@ def get_groups():
         response = requests.get(url)
         response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
-        groups = [h3.text.strip() for h3 in soup.find_all('h3') if h3.text.strip()]
+        groups = []
+        # Ищем только те заголовки h3, которые реально похожи на группы (типа КН25, МАШ24)
+        for h3 in soup.find_all('h3'):
+            text = h3.text.strip()
+            if re.match(r'^[А-ЯІЇЄA-Z]{2,4}\d{2}(\s*\+\s*[А-ЯІЇЄA-Z]{2,4}\d{2})?$', text):
+                groups.append(text)
         return groups if groups else ["МАШ24", "КН25", "АКТ26"]
     except Exception:
-        return ["МАШ24"]
+        return ["МАШ24", "КН25", "АКТ26"]
 
 def get_schedule_for_day(group, day_name):
     url = "https://www.stxt.com.ua/schedule"
@@ -35,53 +40,60 @@ def get_schedule_for_day(group, day_name):
         response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 1. Находим ровно тот тег h3, где написана наша группа (а не в меню)
-        group_header = None
-        for h3 in soup.find_all('h3'):
-            if h3.get_text(strip=True) == group:
-                group_header = h3
-                break
-                
-        if not group_header: 
-            return []
-
+        # Получаем весь текст страницы, разделенный переносами строк
+        text = soup.get_text(separator='\n', strip=True)
+        lines = [line.replace('\xa0', ' ').strip() for line in text.split('\n') if line.strip()]
+        
+        all_groups = get_groups()
         days = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота"]
-        is_target_day = False
-        lessons = []
+        
+        in_group = False
+        in_target_day = False
         current_pair = None
         current_info = []
-
-        # 2. Идем по всем элементам, которые идут СТРОГО ПОСЛЕ заголовка группы
-        for sib in group_header.find_next_siblings():
-            if sib.name in ['h2', 'h3']:
-                break # Дошли до следующей группы - стоп
-            
-            text = sib.get_text(separator=' ', strip=True).replace('\xa0', ' ')
-            if not text: continue
-            
-            # Если это заголовок дня недели
-            if text in days:
-                if is_target_day:
-                    if current_pair is not None and current_info:
-                        lessons.append({"pair": current_pair, "info": " ".join(current_info)})
-                    break # День закончился
-                is_target_day = (text == day_name)
+        lessons = []
+        
+        for line in lines:
+            # 1. Если встретили название группы
+            if line in all_groups:
+                if in_group:
+                    break # Закончилась наша группа, дальше не читаем
+                if line == group:
+                    in_group = True
                 continue
                 
-            if is_target_day:
-                # Проверяем, начинается ли текст с номера пары (например "4" или "4 Українська мова")
-                match = re.match(r'^([1-7])[\.\s]*(.*)', text)
+            if not in_group:
+                continue
+                
+            # 2. Если встретили день недели
+            if line in days:
+                if in_target_day:
+                    # Закончился нужный день, сохраняем последнюю пару и выходим
+                    if current_pair is not None and current_info:
+                        lessons.append({"pair": current_pair, "info": " ".join(current_info)})
+                    break
+                if line == day_name:
+                    in_target_day = True
+                continue
+                
+            # 3. Если мы внутри нужного дня, ищем пары
+            if in_target_day:
+                # Регулярка ищет строку, которая начинается с цифры от 1 до 7 
+                # (например, "4", "4." или "4 Українська мова")
+                match = re.match(r'^([1-7])(?:[\.\s]+|$)(.*)', line)
                 if match:
+                    # Сохраняем предыдущую пару
                     if current_pair is not None and current_info:
                         lessons.append({"pair": current_pair, "info": " ".join(current_info)})
                     current_pair = int(match.group(1))
-                    current_info = [match.group(2).strip()] if match.group(2).strip() else []
+                    info = match.group(2).strip()
+                    current_info = [info] if info else []
                 elif current_pair is not None:
-                    # Если это предмет или преподаватель
-                    current_info.append(text)
+                    # Если это не номер пары, значит это предмет или преподаватель
+                    current_info.append(line)
                     
-        # Сохраняем последнюю пару в дне
-        if is_target_day and current_pair is not None and current_info:
+        # Сохраняем последнюю пару, если день закончился
+        if in_target_day and current_pair is not None and current_info:
             lessons.append({"pair": current_pair, "info": " ".join(current_info)})
             
         return lessons
@@ -89,7 +101,7 @@ def get_schedule_for_day(group, day_name):
         print(f"Ошибка парсинга расписания: {e}")
         return []
 
-# --- Функция замен (оставил без изменений, она работала) ---
+# --- Функция замен (оставил без изменений) ---
 def get_substitutions(group):
     url = "https://www.stxt.com.ua/download/zam.php"
     added, removed = {}, []
