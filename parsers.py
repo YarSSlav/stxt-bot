@@ -3,7 +3,7 @@ import re
 import time
 import zipfile
 import xml.etree.ElementTree as ET
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from io import BytesIO
 
 import openpyxl
@@ -77,6 +77,22 @@ def _cached_get(url, ttl):
 def _norm(s):
     s = s.replace("\xa0", " ").replace("’", "'").replace("`", "'").replace("ʼ", "'")
     return re.sub(r"\s+", " ", s).strip()
+
+
+DATE_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b")
+
+
+def _extract_dates(text):
+    """Усі дати виду дд.мм.рррр, знайдені в тексті файлу замін."""
+    found = set()
+    for d, m, y in DATE_RE.findall(text or ""):
+        y = int(y)
+        y = y + 2000 if y < 100 else y
+        try:
+            found.add(date(y, int(m), int(d)))
+        except ValueError:
+            pass
+    return found
 
 
 def _soup(url, ttl):
@@ -180,7 +196,11 @@ def _fill_from_row(cells, group, state, added, removed):
 
 
 def get_substitutions(group):
-    added, removed = {}, []
+    """
+    Повертає {"added": {...}, "removed": [...], "dates": {date, ...}}.
+    "dates" - усі дати, знайдені у файлі замін (порожньо, якщо дат немає).
+    """
+    added, removed, dates = {}, [], set()
 
     try:
         content = _cached_get(SUBS_URL, TTL_SUBS).content
@@ -188,11 +208,12 @@ def get_substitutions(group):
         # 1) HTML-таблиця
         if b"<table" in content[:1000].lower():
             soup = BeautifulSoup(content, "html.parser")
+            dates = _extract_dates(soup.get_text(" "))
             state = {"pair": None}
             for tr in soup.find_all("tr"):
                 cells = [td.text.strip() for td in tr.find_all(["td", "th"])]
                 _fill_from_row(cells, group, state, added, removed)
-            return {"added": added, "removed": removed}
+            return {"added": added, "removed": removed, "dates": dates}
 
         # 2) .docx
         try:
@@ -200,6 +221,7 @@ def get_substitutions(group):
                 if "word/document.xml" in z.namelist():
                     root = ET.fromstring(z.read("word/document.xml"))
                     ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+                    dates = _extract_dates(" ".join(t.text for t in root.findall(".//w:t", ns) if t.text))
                     state = {"pair": None}
                     for tr in root.findall(".//w:tr", ns):
                         cells = []
@@ -207,7 +229,7 @@ def get_substitutions(group):
                             text = "".join(t.text for t in tc.findall(".//w:t", ns) if t.text)
                             cells.append(text.strip())
                         _fill_from_row(cells, group, state, added, removed)
-                    return {"added": added, "removed": removed}
+                    return {"added": added, "removed": removed, "dates": dates}
         except zipfile.BadZipFile:
             pass
 
@@ -215,12 +237,15 @@ def get_substitutions(group):
         try:
             wb = openpyxl.load_workbook(BytesIO(content), data_only=True)
             state = {"pair": None}
+            all_text = []
             for row in wb.active.iter_rows(values_only=True):
                 if not row or len(row) < 2:
                     continue
                 cells = [str(c).strip() if c is not None else "" for c in row]
+                all_text.append(" ".join(cells))
                 _fill_from_row(cells, group, state, added, removed)
-            return {"added": added, "removed": removed}
+            dates = _extract_dates(" ".join(all_text))
+            return {"added": added, "removed": removed, "dates": dates}
         except Exception:
             pass
 
@@ -231,6 +256,7 @@ def get_substitutions(group):
                 if ole.exists("WordDocument"):
                     text = ole.openstream("WordDocument").read().decode("utf-16-le", errors="ignore")
                     text = text.replace("\r", " ").replace("\n", " ")
+                    dates = _extract_dates(text)
                     cells = text.split("\x07")
                     current_pair = None
                     for i, cell in enumerate(cells):
@@ -249,14 +275,14 @@ def get_substitutions(group):
                                 removed.append(current_pair)
                             elif subject:
                                 added[current_pair] = f"{subject} - {teacher}" if teacher else subject
-                    return {"added": added, "removed": removed}
+                    return {"added": added, "removed": removed, "dates": dates}
             except Exception:
                 pass
 
     except Exception as e:
         print(f"Помилка завантаження замін: {e}")
 
-    return {"added": added, "removed": removed}
+    return {"added": added, "removed": removed, "dates": dates}
 
 
 # ───────────────────────── Автобуси ─────────────────────────
