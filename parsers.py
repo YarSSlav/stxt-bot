@@ -35,62 +35,52 @@ def get_schedule_for_day(group, day_name):
         response.encoding = 'utf-8'
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 1. Получаем ВЕСЬ текст страницы, разбитый на строки
-        text = soup.get_text(separator='\n', strip=True)
-        lines = [line.replace('\xa0', ' ').strip() for line in text.split('\n') if line.strip()]
-        
-        all_groups = get_groups()
-        start_idx = -1
-        end_idx = -1
-        
-        # 2. Находим, где начинается наша группа и где заканчивается
-        for i, line in enumerate(lines):
-            if re.search(rf'\b{re.escape(group)}\b', line):
-                start_idx = i
+        # 1. Находим ровно тот тег h3, где написана наша группа (а не в меню)
+        group_header = None
+        for h3 in soup.find_all('h3'):
+            if h3.get_text(strip=True) == group:
+                group_header = h3
                 break
                 
-        if start_idx == -1: return []
+        if not group_header: 
+            return []
 
-        for i in range(start_idx + 1, len(lines)):
-            if lines[i] in all_groups:
-                end_idx = i
-                break
-        
-        if end_idx == -1: end_idx = len(lines)
-            
-        group_lines = lines[start_idx:end_idx]
-        
-        # 3. Идем по строчкам и выуживаем пары
         days = ["Понеділок", "Вівторок", "Середа", "Четвер", "П'ятниця", "Субота"]
         is_target_day = False
+        lessons = []
         current_pair = None
         current_info = []
-        lessons = []
-        
-        for line in group_lines:
-            # Если нашли день недели
-            if line in days:
+
+        # 2. Идем по всем элементам, которые идут СТРОГО ПОСЛЕ заголовка группы
+        for sib in group_header.find_next_siblings():
+            if sib.name in ['h2', 'h3']:
+                break # Дошли до следующей группы - стоп
+            
+            text = sib.get_text(separator=' ', strip=True).replace('\xa0', ' ')
+            if not text: continue
+            
+            # Если это заголовок дня недели
+            if text in days:
                 if is_target_day:
                     if current_pair is not None and current_info:
                         lessons.append({"pair": current_pair, "info": " ".join(current_info)})
-                    break 
-                is_target_day = (line == day_name)
+                    break # День закончился
+                is_target_day = (text == day_name)
                 continue
                 
-            # Если мы внутри нужного дня
             if is_target_day:
-                # Проверяем, начинается ли строка с номера пары (например, "4", "4.", "4 Українська мова")
-                match = re.match(r'^([1-7])\b[\.\s]*(.*)', line)
+                # Проверяем, начинается ли текст с номера пары (например "4" или "4 Українська мова")
+                match = re.match(r'^([1-7])[\.\s]*(.*)', text)
                 if match:
                     if current_pair is not None and current_info:
                         lessons.append({"pair": current_pair, "info": " ".join(current_info)})
                     current_pair = int(match.group(1))
                     current_info = [match.group(2).strip()] if match.group(2).strip() else []
                 elif current_pair is not None:
-                    # Название предмета или преподаватель
-                    current_info.append(line)
+                    # Если это предмет или преподаватель
+                    current_info.append(text)
                     
-        # Сохраняем самую последнюю пару, если день закончился
+        # Сохраняем последнюю пару в дне
         if is_target_day and current_pair is not None and current_info:
             lessons.append({"pair": current_pair, "info": " ".join(current_info)})
             
@@ -99,7 +89,7 @@ def get_schedule_for_day(group, day_name):
         print(f"Ошибка парсинга расписания: {e}")
         return []
 
-# --- Функция замен (осталась без изменений, она работает идеально) ---
+# --- Функция замен (оставил без изменений, она работала) ---
 def get_substitutions(group):
     url = "https://www.stxt.com.ua/download/zam.php"
     added, removed = {}, []
