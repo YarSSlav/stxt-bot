@@ -181,6 +181,134 @@ def get_schedule_for_day(group, day_name):
 
 # ───────────────────────── Заміни ─────────────────────────
 
+# ───────────────────────── Тиждень (перший / другий) ─────────────────────────
+# У файлі замін вказано, який зараз тиждень. Перший тиждень = верхній рядок
+# у розкладі, другий = нижній. Пари з нижнього рядка на першому тижні не бувають
+# (і навпаки).
+
+# Пари, які бувають лише на одному тижні, але на сайті це ніяк не позначено.
+# Ключ: (група, день, номер пари). Значення: 1 - лише перший тиждень, 2 - лише другий.
+# Щоб додати ще одну пару, допиши рядок виду  ("КН24", "Четвер", 3): 2,
+WEEK_ONLY = {
+    ("МАШ24", "Четвер", 2): 2,   # Астрономія (вибіркова) - нижній рядок
+    ("МАШ24", "Четвер", 3): 2,   # Астрономія (вибіркова) - нижній рядок
+}
+
+# Позначка на сайті: «Астрономія (по 2 тижню) (66)»
+WEEK_MARK_RE = re.compile(r"\s*\(\s*по\s*([12])\s*тижню\s*\)", re.IGNORECASE)
+_TEACHER_RE = re.compile(r"^[А-ЯІЇЄҐ][а-яіїєґ'-]+\s+[А-ЯІЇЄҐ]\.\s?[А-ЯІЇЄҐ]\.(\s*\([^)]*\))?$")
+
+_WEEK_WORD = r"(?P<w>перш\w*|друг\w*|(?<![\w.])(?-i:[IІ]{1,2})(?![\w.])|(?<![\w.])[12](?![\w.]))"
+_WEEK_RES = (
+    re.compile(r"тиж\w*\s*[:\-–—]?\s*" + _WEEK_WORD, re.IGNORECASE),
+    re.compile(r"(?<!по )" + _WEEK_WORD + r"\s*тиж", re.IGNORECASE),
+)
+
+
+def _week_value(w):
+    w = w.lower()
+    if w.startswith("перш") or w in ("i", "і", "1"):
+        return 1
+    if w.startswith("друг") or w in ("ii", "іі", "2"):
+        return 2
+    return None
+
+
+def _extract_week(text):
+    """«Тиждень: перший» / «II тиждень» -> 1 або 2 (None, якщо у файлі не вказано)."""
+    text = _norm(text or "")
+    for rx in _WEEK_RES:
+        m = rx.search(text)
+        if m:
+            v = _week_value(m.group("w"))
+            if v:
+                return v
+    return None
+
+
+def _extract_meta(text):
+    return _extract_dates(text), _extract_week(text)
+
+
+def week_for_date(file_week, file_dates, target_date):
+    """
+    Тиждень на потрібну дату. Файл замін відноситься до своїх дат; якщо потрібна
+    дата в іншому тижні, парність перевертається кожні 7 днів.
+    """
+    if file_week not in (1, 2):
+        return None
+    if not file_dates:
+        return file_week
+    ref = min(file_dates)
+    diff = (target_date - timedelta(days=target_date.weekday())) - (ref - timedelta(days=ref.weekday()))
+    return file_week if (diff.days // 7) % 2 == 0 else 3 - file_week
+
+
+def filter_by_week(group, day_name, lessons, week):
+    """Прибирає пари (або їхні частини), яких немає на цьому тижні. Без тижня нічого не чіпає."""
+    if week not in (1, 2):
+        return lessons
+    out = []
+    for l in lessons:
+        need = WEEK_ONLY.get((group, day_name, l["pair"]))
+        if need and need != week:
+            continue
+        kept, dropped = [], False
+        for part in l["info"].split(" | "):
+            m = WEEK_MARK_RE.search(part)
+            if m:
+                if int(m.group(1)) != week:
+                    dropped = True
+                    continue
+                part = WEEK_MARK_RE.sub("", part, count=1).strip()
+            kept.append(part)
+        # якщо прибрали предмет, а лишились самі викладачі, пари на цьому тижні немає
+        if not kept or (dropped and all(_TEACHER_RE.match(p) for p in kept)):
+            continue
+        out.append({"pair": l["pair"], "info": " | ".join(kept)})
+    return out
+
+
+# ───────────────────────── Аудиторії ─────────────────────────
+# На сайті аудиторія стоїть у дужках: «Інформатика (70)», «Хімія (дист)»,
+# «Виховна година (а/з)», а в підгруп - біля викладача: «Зінченко Т.П. (75)».
+
+ROOM_RE = re.compile(r"^(?:ауд\.?\s*)?(\d{1,3}[А-Яа-яІіA-Za-z]?|[АСас]/[Зз]|дист\.?)$", re.IGNORECASE)
+_TRAILING_PAREN_RE = re.compile(r"^(.*?\S)?\s*\(([^()]+)\)\s*$")
+
+
+def _clean_room(s):
+    return re.sub(r"^ауд\.?\s*", "", s.strip(), flags=re.IGNORECASE).rstrip(".")
+
+
+def split_trailing_room(text):
+    """«Інформатика (70)» -> («Інформатика», «70»). Якщо в дужках не аудиторія -> (text, None)."""
+    text = (text or "").strip()
+    m = _TRAILING_PAREN_RE.match(text)
+    if m and ROOM_RE.match(m.group(2).strip()):
+        return (m.group(1) or "").strip(), _clean_room(m.group(2))
+    return text, None
+
+
+def room_label(room):
+    r = room.lower()
+    if r.startswith("дист"):
+        return "дистанційно"
+    if r == "а/з":
+        return "актовий зал"
+    if r == "с/з":
+        return "спортивний зал"
+    return f"ауд. {room}"
+
+
+def _room_from_cell(s):
+    """Комірка таблиці замін, що містить лише аудиторію (інакше None)."""
+    s = (s or "").strip()
+    if not s or "ЗНЯТО" in s.upper() or not ROOM_RE.match(s):
+        return None
+    return _clean_room(s)
+
+
 def _fill_from_row(cells, group, state, added, removed):
     """Спільна обробка одного рядка таблиці замін."""
     if len(cells) < 2:
@@ -190,9 +318,16 @@ def _fill_from_row(cells, group, state, added, removed):
     if group in cells[1] and state["pair"]:
         subject = cells[3] if len(cells) > 3 else ""
         last_col = cells[-1]
+        if "raw" in state:
+            state["raw"].append(cells)
         if "ЗНЯТО" in subject.upper() or "ЗНЯТО" in last_col.upper():
             removed.append(state["pair"])
         else:
+            # аудиторія із замін: коротка комірка (70, дист, а/з ...), крім номера пари, групи та предмета
+            room = next((r for r in (_room_from_cell(c) for i, c in enumerate(cells)
+                                     if i >= 2 and i != 3) if r), None)
+            if room and subject and split_trailing_room(subject)[1] is None:
+                subject = f"{subject} ({room})"
             added[state["pair"]] = subject
 
 
@@ -202,6 +337,8 @@ def get_substitutions(group):
     "dates" - усі дати, знайдені у файлі замін (порожньо, якщо дат немає).
     """
     added, removed, dates = {}, [], set()
+    raw_rows = []  # сирі рядки замін для /debug
+    week = None    # 1 / 2, якщо у файлі замін вказано тиждень
 
     try:
         content = _cached_get(SUBS_URL, TTL_SUBS).content
@@ -209,12 +346,12 @@ def get_substitutions(group):
         # 1) HTML-таблиця
         if b"<table" in content[:1000].lower():
             soup = BeautifulSoup(content, "html.parser")
-            dates = _extract_dates(soup.get_text(" "))
-            state = {"pair": None}
+            dates, week = _extract_meta(soup.get_text(" "))
+            state = {"pair": None, "raw": raw_rows}
             for tr in soup.find_all("tr"):
                 cells = [td.text.strip() for td in tr.find_all(["td", "th"])]
                 _fill_from_row(cells, group, state, added, removed)
-            return {"added": added, "removed": removed, "dates": dates}
+            return {"added": added, "removed": removed, "dates": dates, "raw": raw_rows, "week": week}
 
         # 2) .docx
         try:
@@ -222,22 +359,22 @@ def get_substitutions(group):
                 if "word/document.xml" in z.namelist():
                     root = ET.fromstring(z.read("word/document.xml"))
                     ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-                    dates = _extract_dates(" ".join(t.text for t in root.findall(".//w:t", ns) if t.text))
-                    state = {"pair": None}
+                    dates, week = _extract_meta(" ".join(t.text for t in root.findall(".//w:t", ns) if t.text))
+                    state = {"pair": None, "raw": raw_rows}
                     for tr in root.findall(".//w:tr", ns):
                         cells = []
                         for tc in tr.findall(".//w:tc", ns):
                             text = "".join(t.text for t in tc.findall(".//w:t", ns) if t.text)
                             cells.append(text.strip())
                         _fill_from_row(cells, group, state, added, removed)
-                    return {"added": added, "removed": removed, "dates": dates}
+                    return {"added": added, "removed": removed, "dates": dates, "raw": raw_rows, "week": week}
         except zipfile.BadZipFile:
             pass
 
         # 3) .xlsx
         try:
             wb = openpyxl.load_workbook(BytesIO(content), data_only=True)
-            state = {"pair": None}
+            state = {"pair": None, "raw": raw_rows}
             all_text = []
             for row in wb.active.iter_rows(values_only=True):
                 if not row or len(row) < 2:
@@ -245,8 +382,8 @@ def get_substitutions(group):
                 cells = [str(c).strip() if c is not None else "" for c in row]
                 all_text.append(" ".join(cells))
                 _fill_from_row(cells, group, state, added, removed)
-            dates = _extract_dates(" ".join(all_text))
-            return {"added": added, "removed": removed, "dates": dates}
+            dates, week = _extract_meta(" ".join(all_text))
+            return {"added": added, "removed": removed, "dates": dates, "raw": raw_rows, "week": week}
         except Exception:
             pass
 
@@ -257,7 +394,7 @@ def get_substitutions(group):
                 if ole.exists("WordDocument"):
                     text = ole.openstream("WordDocument").read().decode("utf-16-le", errors="ignore")
                     text = text.replace("\r", " ").replace("\n", " ")
-                    dates = _extract_dates(text)
+                    dates, week = _extract_meta(text)
                     cells = text.split("\x07")
                     current_pair = None
                     for i, cell in enumerate(cells):
@@ -272,18 +409,24 @@ def get_substitutions(group):
                             subject = cells[i + 2].strip() if i + 2 < len(cells) else ""
                             teacher = cells[i + 3].strip() if i + 3 < len(cells) else ""
                             last_col = cells[i + 4].strip() if i + 4 < len(cells) else ""
+                            raw_rows.append([c.strip() for c in cells[i:i + 5]])
                             if "ЗНЯТО" in (subject + teacher + last_col).upper():
                                 removed.append(current_pair)
                             elif subject:
-                                added[current_pair] = f"{subject} - {teacher}" if teacher else subject
-                    return {"added": added, "removed": removed, "dates": dates}
+                                room = _room_from_cell(teacher) or _room_from_cell(last_col)
+                                if _room_from_cell(teacher):
+                                    teacher = ""
+                                if room and split_trailing_room(subject)[1] is None:
+                                    subject = f"{subject} ({room})"
+                                added[current_pair] = f"{subject} | {teacher}" if teacher else subject
+                    return {"added": added, "removed": removed, "dates": dates, "raw": raw_rows, "week": week}
             except Exception:
                 pass
 
     except Exception as e:
         print(f"Помилка завантаження замін: {e}")
 
-    return {"added": added, "removed": removed, "dates": dates}
+    return {"added": added, "removed": removed, "dates": dates, "raw": raw_rows, "week": week}
 
 
 # ───────────────────────── Автобуси ─────────────────────────
