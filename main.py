@@ -21,10 +21,14 @@ from parsers import (
     _group_lines,
     _parse_day,
     _soup,
+    filter_by_week,
     get_bus_routes,
     get_bus_schedule,
     get_groups,
     get_substitutions,
+    room_label,
+    split_trailing_room,
+    week_for_date,
 )
 
 # Токен береться зі змінної середовища BOT_TOKEN (не зберігай його в коді!)
@@ -286,7 +290,14 @@ async def cmd_debug(message: Message):
 
     try:
         lines = await asyncio.to_thread(work)
-        text = f"Група: {group}\nРядків у блоці групи: {len(lines)}\n\n" + "\n".join(lines[:50])
+        subs = await asyncio.to_thread(get_substitutions, group)
+        raw = "\n".join(" | ".join(r) for r in subs.get("raw", [])) or "—"
+        text = (
+            f"Група: {group}\n"
+            f"Тиждень у замінах: {subs.get('week') or 'не знайдено'}\n"
+            f"Рядки замін (сирі):\n{raw}\n\n"
+            f"Рядків у блоці групи: {len(lines)}\n\n" + "\n".join(lines[:50])
+        )
     except Exception as e:
         text = f"Помилка: {type(e).__name__}: {e}"
     await show(message.chat.id, [(text[:4000], {})])
@@ -304,14 +315,28 @@ DIVIDER = "▬▬▬▬▬▬▬▬▬▬▬▬"
 
 
 def format_lesson(info):
-    """«Предмет | Викладач | Ауд.» -> предмет окремим рядком, решта курсивом під ним."""
+    """
+    «Предмет (70) | Викладач» ->
+        Предмет
+        🚪 ауд. 70
+        Викладач
+    Якщо в підгруп різні аудиторії: «Викладач · 🚪 ауд. 75».
+    """
     parts = [p.strip() for p in info.split(" | ") if p.strip()]
     if not parts:
         return ""
-    text = escape(parts[0])
-    if len(parts) > 1:
-        text += "\n<i>" + escape(" · ".join(parts[1:])) + "</i>"
-    return text
+    subject, room = split_trailing_room(parts[0])
+    lines = [escape(subject or parts[0])]
+    if room:
+        lines.append(f"🚪 {escape(room_label(room))}")
+    for p in parts[1:]:
+        name, r = split_trailing_room(p)
+        if r:
+            door = f"🚪 {escape(room_label(r))}"
+            lines.append(f"<i>{escape(name)}</i> · {door}" if name else door)
+        else:
+            lines.append(f"<i>{escape(p)}</i>")
+    return "\n".join(lines)
 
 
 async def build_schedule_message(user_id, offset=1):
@@ -340,6 +365,11 @@ async def build_schedule_message(user_id, offset=1):
 
     subs = await asyncio.to_thread(get_substitutions, group)
     subs_dates = subs.get("dates") or set()
+
+    # Тиждень (перший/другий) береться із файлу замін і впливає на базовий розклад
+    week = week_for_date(subs.get("week"), subs_dates, target_date)
+    base_lessons = filter_by_week(group, day_name, base_lessons, week)
+    week_note = {1: " · перший тиждень", 2: " · другий тиждень"}.get(week, "")
 
     # Заміни застосовуємо, лише якщо у файлі немає дат або серед них є потрібна.
     subs_apply = (not subs_dates) or (target_date in subs_dates)
@@ -375,7 +405,7 @@ async def build_schedule_message(user_id, offset=1):
     if not final_lessons:
         return f"{notes}{label} ({day_name}) пар немає (і замін теж).{note_dates}", get_bus_keyboard()
 
-    msg = f"{notes}📅 <b>{label}, {day_name}</b>\n👥 Група {escape(group)}\n{DIVIDER}\n\n"
+    msg = f"{notes}📅 <b>{label}, {day_name}</b>\n👥 Група {escape(group)}{week_note}\n{DIVIDER}\n\n"
     first_lesson_time = None
 
     for pair_num in sorted(final_lessons):
